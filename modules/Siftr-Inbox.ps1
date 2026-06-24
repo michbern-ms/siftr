@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Siftr inbox-action helpers — categorize classified emails and move some to
     Outlook folders.  Configuration is loaded from config.json when available.
@@ -639,15 +639,17 @@ function Invoke-SiftrInboxActions {
     #>
     param(
         [Parameter(Mandatory)][array]$Classifications,
-        [switch]$WhatIf
+        [switch]$WhatIf,
+        [switch]$VacationMode
     )
 
     $summary = [PSCustomObject]@{
-        Categorized = 0
-        Moved   = 0
-        Skipped = 0
-        Errors  = 0
-        Details = [System.Collections.Generic.List[PSCustomObject]]::new()
+        Categorized       = 0
+        Moved             = 0
+        Skipped           = 0
+        Errors            = 0
+        VacationOverride = 0
+        Details           = [System.Collections.Generic.List[PSCustomObject]]::new()
     }
 
     $actionQueue = [System.Collections.Generic.List[object]]::new()
@@ -754,6 +756,19 @@ function Invoke-SiftrInboxActions {
                 try { $allowCategoryOverride = [bool]$seed.AllowCategoryOverride } catch { $allowCategoryOverride = $false }
             }
 
+            # Detect Outlook importance for vacation-mode override decisions
+            $isHighImportance = $false
+            try {
+                if ($target.PSObject.TypeNames -notcontains 'System.Management.Automation.PSCustomObject') {
+                    # COM object — read Importance directly (2 = olImportanceHigh)
+                    $isHighImportance = ([int]$target.Importance -eq 2)
+                } elseif ($null -ne $target.PSObject.Properties['Importance']) {
+                    $isHighImportance = ([string]$target.Importance -eq 'high')
+                } elseif ($null -ne $seed.PSObject.Properties['Importance']) {
+                    $isHighImportance = ([string]$seed.Importance -eq 'high')
+                }
+            } catch {}
+
             $actionQueue.Add([PSCustomObject]@{
                 InternetMessageId = $targetId
                 Item = if ($target -and $target.PSObject.TypeNames -notcontains 'System.Management.Automation.PSCustomObject') { $target } else { $null }
@@ -763,6 +778,7 @@ function Invoke-SiftrInboxActions {
                 Subject = $targetSubject
                 ConversationId = if ($null -ne $seed.PSObject.Properties['ConversationId']) { $seed.ConversationId } else { $null }
                 ReceivedDateTime = $targetReceivedDateTime
+                IsHighImportance = $isHighImportance
             })
         }
     }
@@ -784,6 +800,24 @@ function Invoke-SiftrInboxActions {
         $categories = @(_Resolve-SiftrCategories -Tier $msg.Tier -RequestedCategories $requestedCategories -AllowOverride:$allowCategoryOverride)
 
         $targetFolder = $script:SiftrFolderRules[$tierClean]
+
+        # Vacation mode: redirect non-high-importance, non-CALENDAR emails to LowPri
+        if ($VacationMode -and $tierClean -ne 'CALENDAR') {
+            $isHighImportance = $false
+            if ($null -ne $msg.PSObject.Properties['IsHighImportance']) {
+                try { $isHighImportance = [bool]$msg.IsHighImportance } catch {}
+            }
+            if (-not $isHighImportance) {
+                $lpFolder = $script:SiftrFolderRules['LOW PRIORITY']
+                if ($lpFolder) {
+                    if ($targetFolder -ne $lpFolder) {
+                        $summary.VacationOverride++
+                    }
+                    $targetFolder = $lpFolder
+                }
+            }
+        }
+
         if ($categories.Count -eq 0 -and -not $targetFolder) {
             $summary.Skipped++
             continue
@@ -901,8 +935,14 @@ function Invoke-SiftrInboxActions {
     }
     if ($summary.Skipped -gt 0) { $parts += "$($summary.Skipped) skipped" }
     if ($summary.Errors -gt 0) { $parts += "$($summary.Errors) errors" }
+    if ($VacationMode -and $summary.VacationOverride -gt 0) {
+        $parts += "$($summary.VacationOverride) vacation redirects"
+    }
 
-    $label = if ($WhatIf) { "🏷️📦 Dry run" } else { "🏷️📦 Siftr actions" }
+    $label = if ($WhatIf -and $VacationMode) { "🏖️🏷️📦 Dry run (vacation)" }
+             elseif ($VacationMode)           { "🏖️🏷️📦 Siftr actions (vacation)" }
+             elseif ($WhatIf)                   { "🏷️📦 Dry run" }
+             else                               { "🏷️📦 Siftr actions" }
     $line = if ($parts.Count -gt 0) {
         "$label`: $($parts -join ', ')"
     }
