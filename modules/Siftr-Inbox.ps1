@@ -762,10 +762,25 @@ function Invoke-SiftrInboxActions {
                 if ($target.PSObject.TypeNames -notcontains 'System.Management.Automation.PSCustomObject') {
                     # COM object — read Importance directly (2 = olImportanceHigh)
                     $isHighImportance = ([int]$target.Importance -eq 2)
+                } elseif ($null -ne $target.PSObject.Properties['IsHighImportance']) {
+                    # Caller-supplied field (preferred when COM object not available)
+                    $isHighImportance = [bool]$target.IsHighImportance
+                } elseif ($null -ne $seed.PSObject.Properties['IsHighImportance']) {
+                    $isHighImportance = [bool]$seed.IsHighImportance
                 } elseif ($null -ne $target.PSObject.Properties['Importance']) {
                     $isHighImportance = ([string]$target.Importance -eq 'high')
                 } elseif ($null -ne $seed.PSObject.Properties['Importance']) {
                     $isHighImportance = ([string]$seed.Importance -eq 'high')
+                } else {
+                    # Last resort: COM lookup by IID to read importance
+                    if (-not [string]::IsNullOrWhiteSpace($targetId)) {
+                        if ($null -eq $inbox) { $inbox = _Get-OutlookInbox }
+                        $iidFilter = "@SQL=""http://schemas.microsoft.com/mapi/proptag/0x1035001E"" = '$($targetId.Replace("'","''"))'"
+                        $found = $inbox.Items.Find($iidFilter)
+                        if ($found) {
+                            $isHighImportance = ([int]$found.Importance -eq 2)
+                        }
+                    }
                 }
             } catch {}
 
