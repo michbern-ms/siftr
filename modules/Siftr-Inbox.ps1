@@ -772,11 +772,12 @@ function Invoke-SiftrInboxActions {
                 } elseif ($null -ne $seed.PSObject.Properties['Importance']) {
                     $isHighImportance = ([string]$seed.Importance -eq 'high')
                 } else {
-                    # Last resort: COM lookup by IID to read importance
+                    # Last resort: COM lookup by IID to read importance. Reuse the
+                    # shared helper so the proptag (0x1035001F / Unicode) and quote
+                    # escaping stay consistent with the rest of the module.
                     if (-not [string]::IsNullOrWhiteSpace($targetId)) {
                         if ($null -eq $inbox) { $inbox = _Get-OutlookInbox }
-                        $iidFilter = "@SQL=""http://schemas.microsoft.com/mapi/proptag/0x1035001E"" = '$($targetId.Replace("'","''"))'"
-                        $found = $inbox.Items.Find($iidFilter)
+                        $found = _Find-MessageByInternetId -InternetMessageId $targetId -Inbox $inbox
                         if ($found) {
                             $isHighImportance = ([int]$found.Importance -eq 2)
                         }
