@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Siftr inbox-action helpers — categorize classified emails and move some to
     Outlook folders.  Configuration is loaded from config.json when available.
@@ -69,6 +69,9 @@ if ($script:SiftrPersonalPath) {
 
 # Build folder rules from config (with legacy defaults)
 $script:SiftrFolderRules = @{}
+# Folder used by vacation mode for non-low-priority mail that is filed out of
+# the Inbox. Overridable via config (actions.vacation.mediumFolder).
+$script:SiftrVacationMediumFolder = 'MedPri'
 if ($script:SiftrConfig -and $script:SiftrConfig.actions) {
     $lp = $script:SiftrConfig.actions.lowPriority
     if ($lp -and $lp.behavior -eq 'move' -and $lp.folder) {
@@ -77,6 +80,10 @@ if ($script:SiftrConfig -and $script:SiftrConfig.actions) {
     $cal = $script:SiftrConfig.actions.calendar
     if ($cal -and $cal.behavior -eq 'move' -and $cal.folder) {
         $script:SiftrFolderRules['CALENDAR'] = $cal.folder
+    }
+    $vac = $script:SiftrConfig.actions.vacation
+    if ($vac -and $vac.mediumFolder) {
+        $script:SiftrVacationMediumFolder = $vac.mediumFolder
     }
 } else {
     # Legacy defaults when no config.json exists
@@ -817,19 +824,25 @@ function Invoke-SiftrInboxActions {
 
         $targetFolder = $script:SiftrFolderRules[$tierClean]
 
-        # Vacation mode: redirect non-high-importance, non-CALENDAR emails to LowPri
+        # Vacation mode: keep only high-importance mail in the Inbox. Genuine
+        # LOW PRIORITY mail still goes to the LowPri folder; everything else that
+        # would otherwise stay in the Inbox is filed in the medium-priority folder.
         if ($VacationMode -and $tierClean -ne 'CALENDAR') {
             $isHighImportance = $false
             if ($null -ne $msg.PSObject.Properties['IsHighImportance']) {
                 try { $isHighImportance = [bool]$msg.IsHighImportance } catch {}
             }
             if (-not $isHighImportance) {
-                $lpFolder = $script:SiftrFolderRules['LOW PRIORITY']
-                if ($lpFolder) {
-                    if ($targetFolder -ne $lpFolder) {
+                $vacationFolder = if ($tierClean -eq 'LOW PRIORITY') {
+                    $script:SiftrFolderRules['LOW PRIORITY']
+                } else {
+                    $script:SiftrVacationMediumFolder
+                }
+                if ($vacationFolder) {
+                    if ($targetFolder -ne $vacationFolder) {
                         $summary.VacationOverride++
                     }
-                    $targetFolder = $lpFolder
+                    $targetFolder = $vacationFolder
                 }
             }
         }

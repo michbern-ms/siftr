@@ -1,4 +1,4 @@
----
+﻿---
 name: siftr
 description: >
   Email triage skill for Outlook inbox. Fetches unread mail, classifies by
@@ -436,7 +436,8 @@ Output a grouped, prioritized summary in this format:
   🏖️ VACATION MODE — only high-importance emails stay in Inbox
   ```
   All tiers are still shown so the user can see what arrived. The action step
-  (§5) handles moving non-high-importance items to LowPri.
+  (§5) handles filing non-high-importance items out of the Inbox (non-low-priority
+  mail to MedPri, genuine LOW PRIORITY mail to LowPri).
 
 ---
 
@@ -481,7 +482,7 @@ After presenting the briefing, apply Outlook categories and folder-move rules us
    `"🏷️📦 Siftr actions: 2 → Urgent, 5 → Action, 7 → Inform, 8 → LowPri, 3 → Meetings"`).
    In vacation mode the module prefixes the label with 🏖️ and appends a
    redirect count (e.g.,
-   `"🏖️🏷️📦 Siftr actions (vacation): 2 → Urgent, 5 → Action, 7 → Inform, 15 → LowPri, 3 → Meetings, 12 vacation redirects"`).
+   `"🏖️🏷️📦 Siftr actions (vacation): 2 → Urgent, 5 → Action, 7 → Inform, 9 → MedPri, 6 → LowPri, 3 → Meetings, 9 vacation redirects"`).
 
 **Notes:**
 - Tiers without a folder mapping still receive their configured Outlook category
@@ -493,7 +494,8 @@ After presenting the briefing, apply Outlook categories and folder-move rules us
   after the fetch step.
 - Use `-WhatIf` for a dry run that reports planned moves without executing.
 - When vacation mode is active, `-WhatIf` also shows which messages would
-  be redirected to LowPri by the vacation override vs. by normal tier rules.
+  be redirected (non-low-priority mail to MedPri, LOW PRIORITY mail to LowPri)
+  by the vacation override vs. by normal tier rules.
 
 ---
 
@@ -1246,6 +1248,9 @@ Write `config.json` to the personal-data directory with all choices:
     "calendar": {
       "behavior": "move",
       "folder": "Meetings"
+    },
+    "vacation": {
+      "mediumFolder": "MedPri"
     }
   },
   "categories": {
@@ -1287,15 +1292,22 @@ Run siftr with universal rules only (no `rules.md` yet). After the briefing:
 
 Vacation mode is a strict inbox-zero filter for when the user is away or
 unavailable. When active, **only emails marked with the Outlook High importance
-indicator (⚠️ red flag) stay in the main Inbox**. Everything else is moved to
-LowPri, with the exception of 📅 CALENDAR items which still go to their
-configured folder (default: `Meetings`).
+indicator (⚠️ red flag) stay in the main Inbox**. Everything else is filed out
+of the Inbox:
+
+- **Genuine ⚪ LOW PRIORITY mail** → `LowPri` folder (its normal destination).
+- **All other non-high-importance mail** (🟠 ACTION NEEDED, 🟢 INFORMED, etc.)
+  → `MedPri` (medium-priority) folder, so it is separated from true noise and
+  easy to review on return.
+- **📅 CALENDAR items** are exempt and still go to their configured folder
+  (default: `Meetings`).
 
 Full triage classification still runs normally in vacation mode — every email
 is assigned a tier, gets its Outlook categories applied, and appears in the
 briefing. The difference is in the action step: the folder destination is
-overridden to LowPri for any message that is not Outlook-high-importance and
-not a CALENDAR item.
+overridden for any message that is not Outlook-high-importance and not a
+CALENDAR item — to `MedPri` unless the message is genuinely LOW PRIORITY (which
+still goes to `LowPri`).
 
 ### 13a. Enabling and disabling
 
@@ -1314,7 +1326,8 @@ siftr vacation off  → disable vacation mode
    ```
    🏖️ Vacation mode ON
       Only high-importance emails will stay in your Inbox.
-      Everything else goes to LowPri (CALENDAR items still go to Meetings).
+      Other mail goes to MedPri, except genuine low-priority mail (LowPri)
+      and CALENDAR items (Meetings).
       Run "siftr" to apply, or "siftr vacation off" to return to normal.
    ```
 
@@ -1345,10 +1358,12 @@ When `$vacationMode` is `$true` (loaded in §0b):
    Invoke-SiftrInboxActions -Classifications $classifications `
        -VacationMode:$vacationMode
    ```
-   The module overrides the folder destination to LowPri for any message where
-   `IsHighImportance` is `$false` and the tier is not CALENDAR. Categories are
-   still applied to each message before it is moved, so the user can see what
-   Siftr classified each item as when reviewing the LowPri folder.
+   The module overrides the folder destination for any message where
+   `IsHighImportance` is `$false` and the tier is not CALENDAR — to the
+   medium-priority folder (`MedPri` by default), or to `LowPri` when the
+   message is genuinely ⚪ LOW PRIORITY. Categories are still applied to each
+   message before it is moved, so the user can see what Siftr classified each
+   item as when reviewing the MedPri/LowPri folders.
 
 3. **Dry-run (§8, `siftr dry-run`):** Pass both `-WhatIf` and `-VacationMode`.
    The output shows which messages would be redirected by the vacation override.
@@ -1370,6 +1385,21 @@ Vacation mode is stored in `config.json`:
 
 This field sits at the top level alongside `orgDomain`, `actions`, etc. When
 the field is absent, vacation mode is `false` (normal triage).
+
+The medium-priority folder used for non-low-priority redirects is configurable
+under `actions.vacation.mediumFolder` (default: `MedPri`):
+
+```json
+{
+  "actions": {
+    "vacation": { "mediumFolder": "MedPri" }
+  }
+}
+```
+
+When this setting is absent, the module defaults to a `MedPri` folder under the
+Inbox. Make sure the folder exists (create it in Outlook or via setup) before
+running a vacation-mode triage.
 
 ### 13d. siftr status
 
