@@ -69,6 +69,9 @@ if ($script:SiftrPersonalPath) {
 
 # Build folder rules from config (with legacy defaults)
 $script:SiftrFolderRules = @{}
+# Folder used by vacation mode for non-low-priority mail that is filed out of
+# the Inbox. Overridable via config (actions.vacation.mediumFolder).
+$script:SiftrVacationMediumFolder = 'MedPri'
 if ($script:SiftrConfig -and $script:SiftrConfig.actions) {
     $lp = $script:SiftrConfig.actions.lowPriority
     if ($lp -and $lp.behavior -eq 'move' -and $lp.folder) {
@@ -77,6 +80,10 @@ if ($script:SiftrConfig -and $script:SiftrConfig.actions) {
     $cal = $script:SiftrConfig.actions.calendar
     if ($cal -and $cal.behavior -eq 'move' -and $cal.folder) {
         $script:SiftrFolderRules['CALENDAR'] = $cal.folder
+    }
+    $vac = $script:SiftrConfig.actions.vacation
+    if ($vac -and $vac.mediumFolder) {
+        $script:SiftrVacationMediumFolder = $vac.mediumFolder
     }
 } else {
     # Legacy defaults when no config.json exists
@@ -639,15 +646,17 @@ function Invoke-SiftrInboxActions {
     #>
     param(
         [Parameter(Mandatory)][array]$Classifications,
-        [switch]$WhatIf
+        [switch]$WhatIf,
+        [switch]$VacationMode
     )
 
     $summary = [PSCustomObject]@{
-        Categorized = 0
-        Moved   = 0
-        Skipped = 0
-        Errors  = 0
-        Details = [System.Collections.Generic.List[PSCustomObject]]::new()
+        Categorized       = 0
+        Moved             = 0
+        Skipped           = 0
+        Errors            = 0
+        VacationOverride = 0
+        Details           = [System.Collections.Generic.List[PSCustomObject]]::new()
     }
 
     $actionQueue = [System.Collections.Generic.List[object]]::new()
@@ -754,6 +763,35 @@ function Invoke-SiftrInboxActions {
                 try { $allowCategoryOverride = [bool]$seed.AllowCategoryOverride } catch { $allowCategoryOverride = $false }
             }
 
+            # Detect Outlook importance for vacation-mode override decisions
+            $isHighImportance = $false
+            try {
+                if ($target.PSObject.TypeNames -notcontains 'System.Management.Automation.PSCustomObject') {
+                    # COM object — read Importance directly (2 = olImportanceHigh)
+                    $isHighImportance = ([int]$target.Importance -eq 2)
+                } elseif ($null -ne $target.PSObject.Properties['IsHighImportance']) {
+                    # Caller-supplied field (preferred when COM object not available)
+                    $isHighImportance = [bool]$target.IsHighImportance
+                } elseif ($null -ne $seed.PSObject.Properties['IsHighImportance']) {
+                    $isHighImportance = [bool]$seed.IsHighImportance
+                } elseif ($null -ne $target.PSObject.Properties['Importance']) {
+                    $isHighImportance = ([string]$target.Importance -eq 'high')
+                } elseif ($null -ne $seed.PSObject.Properties['Importance']) {
+                    $isHighImportance = ([string]$seed.Importance -eq 'high')
+                } else {
+                    # Last resort: COM lookup by IID to read importance. Reuse the
+                    # shared helper so the proptag (0x1035001F / Unicode) and quote
+                    # escaping stay consistent with the rest of the module.
+                    if (-not [string]::IsNullOrWhiteSpace($targetId)) {
+                        if ($null -eq $inbox) { $inbox = _Get-OutlookInbox }
+                        $found = _Find-MessageByInternetId -InternetMessageId $targetId -Inbox $inbox
+                        if ($found) {
+                            $isHighImportance = ([int]$found.Importance -eq 2)
+                        }
+                    }
+                }
+            } catch {}
+
             $actionQueue.Add([PSCustomObject]@{
                 InternetMessageId = $targetId
                 Item = if ($target -and $target.PSObject.TypeNames -notcontains 'System.Management.Automation.PSCustomObject') { $target } else { $null }
@@ -763,6 +801,7 @@ function Invoke-SiftrInboxActions {
                 Subject = $targetSubject
                 ConversationId = if ($null -ne $seed.PSObject.Properties['ConversationId']) { $seed.ConversationId } else { $null }
                 ReceivedDateTime = $targetReceivedDateTime
+                IsHighImportance = $isHighImportance
             })
         }
     }
@@ -784,6 +823,30 @@ function Invoke-SiftrInboxActions {
         $categories = @(_Resolve-SiftrCategories -Tier $msg.Tier -RequestedCategories $requestedCategories -AllowOverride:$allowCategoryOverride)
 
         $targetFolder = $script:SiftrFolderRules[$tierClean]
+
+        # Vacation mode: keep only high-importance mail in the Inbox. Genuine
+        # LOW PRIORITY mail still goes to the LowPri folder; everything else that
+        # would otherwise stay in the Inbox is filed in the medium-priority folder.
+        if ($VacationMode -and $tierClean -ne 'CALENDAR') {
+            $isHighImportance = $false
+            if ($null -ne $msg.PSObject.Properties['IsHighImportance']) {
+                try { $isHighImportance = [bool]$msg.IsHighImportance } catch {}
+            }
+            if (-not $isHighImportance) {
+                $vacationFolder = if ($tierClean -eq 'LOW PRIORITY') {
+                    $script:SiftrFolderRules['LOW PRIORITY']
+                } else {
+                    $script:SiftrVacationMediumFolder
+                }
+                if ($vacationFolder) {
+                    if ($targetFolder -ne $vacationFolder) {
+                        $summary.VacationOverride++
+                    }
+                    $targetFolder = $vacationFolder
+                }
+            }
+        }
+
         if ($categories.Count -eq 0 -and -not $targetFolder) {
             $summary.Skipped++
             continue
@@ -901,8 +964,14 @@ function Invoke-SiftrInboxActions {
     }
     if ($summary.Skipped -gt 0) { $parts += "$($summary.Skipped) skipped" }
     if ($summary.Errors -gt 0) { $parts += "$($summary.Errors) errors" }
+    if ($VacationMode -and $summary.VacationOverride -gt 0) {
+        $parts += "$($summary.VacationOverride) vacation redirects"
+    }
 
-    $label = if ($WhatIf) { "🏷️📦 Dry run" } else { "🏷️📦 Siftr actions" }
+    $label = if ($WhatIf -and $VacationMode) { "🏖️🏷️📦 Dry run (vacation)" }
+             elseif ($VacationMode)           { "🏖️🏷️📦 Siftr actions (vacation)" }
+             elseif ($WhatIf)                   { "🏷️📦 Dry run" }
+             else                               { "🏷️📦 Siftr actions" }
     $line = if ($parts.Count -gt 0) {
         "$label`: $($parts -join ', ')"
     }

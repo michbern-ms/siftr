@@ -60,6 +60,16 @@ If `config.json` is missing but the personal-data directory exists, use
 legacy defaults (LowPri folder, Meetings folder, standard categories). Log
 a suggestion to run `siftr setup`.
 
+Also check for `vacationMode` in the config:
+```powershell
+$vacationMode = $false
+if ($config -and $null -ne $config.PSObject.Properties['vacationMode']) {
+    $vacationMode = [bool]$config.vacationMode
+}
+```
+Keep `$vacationMode` in working memory — it affects the briefing banner (§4)
+and the Outlook actions step (§5). See §13 for full vacation mode details.
+
 ### 0c. Load personal rules
 
 If `rules.md` exists in the personal-data directory, read it. Personal rules
@@ -420,6 +430,14 @@ Output a grouped, prioritized summary in this format:
 - For 🟢 and ⚪, you may summarize if there are more than 10
   (e.g., "12 status updates from various senders").
 - Keep each line's summary to ~80 characters.
+- **When vacation mode is active** (`$vacationMode -eq $true`), prepend
+  this banner before the briefing:
+  ```
+  🏖️ VACATION MODE — only high-importance emails stay in Inbox
+  ```
+  All tiers are still shown so the user can see what arrived. The action step
+  (§5) handles filing non-high-importance items out of the Inbox (non-low-priority
+  mail to MedPri, genuine LOW PRIORITY mail to LowPri).
 
 ---
 
@@ -444,7 +462,8 @@ After presenting the briefing, apply Outlook categories and folder-move rules us
       chosen tier.
 3. Call:
    ```powershell
-   Invoke-SiftrInboxActions -Classifications $classifications
+   Invoke-SiftrInboxActions -Classifications $classifications `
+       -VacationMode:$vacationMode
    ```
 4. The function applies categories using the tier → Intent × Priority mapping
    (category names from `config.json`, defaults shown):
@@ -461,6 +480,9 @@ After presenting the briefing, apply Outlook categories and folder-move rules us
    Folder behaviors are configurable: move, categorize-only, or do-nothing.
 6. Include the summary line in the briefing output (e.g.,
    `"🏷️📦 Siftr actions: 2 → Urgent, 5 → Action, 7 → Inform, 8 → LowPri, 3 → Meetings"`).
+   In vacation mode the module prefixes the label with 🏖️ and appends a
+   redirect count (e.g.,
+   `"🏖️🏷️📦 Siftr actions (vacation): 2 → Urgent, 5 → Action, 7 → Inform, 9 → MedPri, 6 → LowPri, 3 → Meetings, 9 vacation redirects"`).
 
 **Notes:**
 - Tiers without a folder mapping still receive their configured Outlook category
@@ -471,6 +493,9 @@ After presenting the briefing, apply Outlook categories and folder-move rules us
   it as **skipped**, not an error. This usually means it was moved or changed
   after the fetch step.
 - Use `-WhatIf` for a dry run that reports planned moves without executing.
+- When vacation mode is active, `-WhatIf` also shows which messages would
+  be redirected (non-low-priority mail to MedPri, LOW PRIORITY mail to LowPri)
+  by the vacation override vs. by normal tier rules.
 
 ---
 
@@ -622,6 +647,8 @@ overrode a classification and can inform rule changes.
 | `siftr loop continuous` | Start hourly triage loop in continuous mode until stopped |
 | `siftr loop until {time}` | Start loop with custom end time |
 | `siftr stop` | Stop the running loop gracefully |
+| `siftr vacation on` | Enable vacation mode — only high-importance emails stay in Inbox (see §13) |
+| `siftr vacation off` | Disable vacation mode — return to normal triage behavior |
 
 ---
 
@@ -1221,6 +1248,9 @@ Write `config.json` to the personal-data directory with all choices:
     "calendar": {
       "behavior": "move",
       "folder": "Meetings"
+    },
+    "vacation": {
+      "mediumFolder": "MedPri"
     }
   },
   "categories": {
@@ -1254,4 +1284,135 @@ Run siftr with universal rules only (no `rules.md` yet). After the briefing:
    Review the results at http://localhost:8473 and override anything that
    doesn't look right. Then say "siftr learn" to start building your
    personal rules.
+```
+
+---
+
+## 13. Vacation Mode
+
+Vacation mode is a strict inbox-zero filter for when the user is away or
+unavailable. When active, **only emails marked with the Outlook High importance
+indicator (⚠️ red flag) stay in the main Inbox**. Everything else is filed out
+of the Inbox:
+
+- **Genuine ⚪ LOW PRIORITY mail** → `LowPri` folder (its normal destination).
+- **All other non-high-importance mail** (🟠 ACTION NEEDED, 🟢 INFORMED, etc.)
+  → `MedPri` (medium-priority) folder, so it is separated from true noise and
+  easy to review on return.
+- **📅 CALENDAR items** are exempt and still go to their configured folder
+  (default: `Meetings`).
+
+Full triage classification still runs normally in vacation mode — every email
+is assigned a tier, gets its Outlook categories applied, and appears in the
+briefing. The difference is in the action step: the folder destination is
+overridden for any message that is not Outlook-high-importance and not a
+CALENDAR item — to `MedPri` unless the message is genuinely LOW PRIORITY (which
+still goes to `LowPri`).
+
+### 13a. Enabling and disabling
+
+```
+siftr vacation on   → enable vacation mode
+siftr vacation off  → disable vacation mode
+```
+
+**Enabling (`siftr vacation on`):**
+
+1. Read `config.json` from the personal-data directory (or use in-memory config).
+2. Set `vacationMode: true`.
+3. Write the updated config back to `config.json` (BOM-free UTF-8, atomic
+   write via temp file + replace).
+4. Confirm to the user:
+   ```
+   🏖️ Vacation mode ON
+      Only high-importance emails will stay in your Inbox.
+      Other mail goes to MedPri, except genuine low-priority mail (LowPri)
+      and CALENDAR items (Meetings).
+      Run "siftr" to apply, or "siftr vacation off" to return to normal.
+   ```
+
+**Disabling (`siftr vacation off`):**
+
+1. Set `vacationMode: false` in `config.json` and write back.
+2. Confirm to the user:
+   ```
+   ✅ Vacation mode OFF — normal triage behavior restored.
+   ```
+
+If `config.json` does not exist when enabling vacation mode, create a
+minimal one with `{ "vacationMode": true }`. Prompt the user to run
+`siftr setup` to fill in the remaining settings.
+
+### 13b. Behavior during triage
+
+When `$vacationMode` is `$true` (loaded in §0b):
+
+1. **Briefing (§4):** Prepend the banner:
+   ```
+   🏖️ VACATION MODE — only high-importance emails stay in Inbox
+   ```
+   All tiers are still shown in the briefing so the user can see what arrived.
+
+2. **Outlook actions (§5):** Pass `-VacationMode` to `Invoke-SiftrInboxActions`:
+   ```powershell
+   Invoke-SiftrInboxActions -Classifications $classifications `
+       -VacationMode:$vacationMode
+   ```
+   The module overrides the folder destination for any message where
+   `IsHighImportance` is `$false` and the tier is not CALENDAR — to the
+   medium-priority folder (`MedPri` by default), or to `LowPri` when the
+   message is genuinely ⚪ LOW PRIORITY. Categories are still applied to each
+   message before it is moved, so the user can see what Siftr classified each
+   item as when reviewing the MedPri/LowPri folders.
+
+3. **Dry-run (§8, `siftr dry-run`):** Pass both `-WhatIf` and `-VacationMode`.
+   The output shows which messages would be redirected by the vacation override.
+
+4. **Loop mode (§11):** Loop triage cycles read `$vacationMode` from
+   `config.json` at the start of each cycle (same §0b load step). If the user
+   enables or disables vacation mode mid-loop, the change takes effect on the
+   next cycle.
+
+### 13c. Persistence
+
+Vacation mode is stored in `config.json`:
+
+```json
+{
+  "vacationMode": true
+}
+```
+
+This field sits at the top level alongside `orgDomain`, `actions`, etc. When
+the field is absent, vacation mode is `false` (normal triage).
+
+The medium-priority folder used for non-low-priority redirects is configurable
+under `actions.vacation.mediumFolder` (default: `MedPri`):
+
+```json
+{
+  "actions": {
+    "vacation": { "mediumFolder": "MedPri" }
+  }
+}
+```
+
+When this setting is absent, the module defaults to a `MedPri` folder under the
+Inbox. Make sure the folder exists (create it in Outlook or via setup) before
+running a vacation-mode triage.
+
+### 13d. siftr status
+
+When the user runs `siftr status`, include vacation mode state:
+
+```
+📋 Siftr status
+   ...
+   🏖️ Vacation mode: ON
+```
+
+Or when off:
+
+```
+   Vacation mode: off
 ```
