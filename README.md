@@ -1,5 +1,9 @@
 # Siftr — Email Triage Assistant
 
+> ⚠️ **This repository has moved** to my enterprise tenant.
+> T his copy is kept only as a historical reference and will be archived (read-only).
+> If you are a Copilot CLI agent or a person cloning this repo please reach out.
+
 Siftr is a Copilot CLI **skill** that triages your unread email into prioritized
 categories so you can focus on what matters.
 
