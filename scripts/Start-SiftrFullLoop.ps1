@@ -789,6 +789,40 @@ function Filter-LoopMessagesBySince {
     })
 }
 
+function Get-LoopBacklogSince {
+    param(
+        [Parameter(Mandatory)][datetime]$Since,
+        $State
+    )
+
+    $recentCutoffLocal = Get-LoopRecentCutoffLocal
+    if ($Since.Kind -eq [System.DateTimeKind]::Utc) {
+        $Since = Convert-UtcToCurrentLocalDateTime -Timestamp $Since
+    }
+
+    if ($State -and (Test-ContinuousMode -State $State) -and $Since -lt $recentCutoffLocal) {
+        return $Since
+    }
+
+    $recentCutoffLocal
+}
+
+function Assert-SiftrInboxActionSummary {
+    param([Parameter(Mandatory)]$Summary)
+
+    if ([int]$Summary.Errors -le 0) {
+        return
+    }
+
+    $failures = @($Summary.Details | Where-Object Action -eq 'Failed' | ForEach-Object {
+        $subject = if ([string]::IsNullOrWhiteSpace([string]$_.Subject)) { '<unknown subject>' } else { [string]$_.Subject }
+        $errorText = if ([string]::IsNullOrWhiteSpace([string]$_.Error)) { 'unknown error' } else { [string]$_.Error }
+        "$subject`: $errorText"
+    })
+    $detailText = if ($failures.Count -gt 0) { $failures -join '; ' } else { 'No failure details were returned.' }
+    throw "Outlook actions reported $($Summary.Errors) error(s): $detailText"
+}
+
 function Get-NextCycleBoundaryLocal {
     param([datetime]$After)
 
@@ -900,7 +934,8 @@ function Get-TriageInboxMessages {
             Write-LoopEvent -Type 'cycle_stage' -Message $Message -Data @{ stage = $Stage; since = $Since.ToString('o'); limit = $Limit }
         }
 
-        $attemptMessages = Filter-LoopMessagesBySince -Messages @(Get-SiftrInboxRootMessages -Since $Since -Limit $Limit -IncludeRead -SkipCategorized) -Since $Since
+        $backlogSince = Get-LoopBacklogSince -Since $Since -State $State
+        $attemptMessages = Filter-LoopMessagesBySince -Messages @(Get-SiftrInboxRootMessages -Since $Since -Limit $Limit -IncludeRead -SkipCategorized) -Since $backlogSince
         $messages = & $mergeMessages -Existing $messages -Incoming $attemptMessages
 
         if ($messages.Count -ge $Limit) { break }
@@ -3244,7 +3279,15 @@ function Run-Cycle {
 
         if ($classifications.Count -gt 0) {
             Write-LoopEvent -Type 'cycle_stage' -Message 'Applying Outlook actions' -Data @{ stage = 'applying-actions'; classificationCount = $classifications.Count }
-            Invoke-SiftrInboxActions -Classifications @($classifications) | Out-Null
+            $actionSummary = Invoke-SiftrInboxActions -Classifications @($classifications)
+            Write-LoopEvent -Type 'outlook_actions_completed' -Message 'Outlook actions completed' -Data @{
+                categorized = [int]$actionSummary.Categorized
+                moved = [int]$actionSummary.Moved
+                skipped = [int]$actionSummary.Skipped
+                errors = [int]$actionSummary.Errors
+                vacationOverride = [int]$actionSummary.VacationOverride
+            }
+            Assert-SiftrInboxActionSummary -Summary $actionSummary
         }
     }
 
