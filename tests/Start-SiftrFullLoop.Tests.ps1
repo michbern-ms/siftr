@@ -33,6 +33,11 @@ function Import-LoopFunction {
     'Get-CurrentLocalDateTime',
     'Convert-UtcToCurrentLocalDateTime',
     'Convert-CurrentLocalToUtc',
+    'Test-ContinuousMode',
+    'Get-LoopRecentCutoffLocal',
+    'Filter-LoopMessagesBySince',
+    'Get-LoopBacklogSince',
+    'Assert-SiftrInboxActionSummary',
     'Get-Addressing',
     'Get-ToCount',
     'Test-InternalSender',
@@ -53,7 +58,7 @@ function Import-LoopFunction {
     'Get-HeuristicDecision'
 ) | ForEach-Object { Import-LoopFunction -Name $_ }
 
-function New-TestRecord {
+function global:New-TestRecord {
     param(
         [string]$SenderName,
         [string]$SenderAddress,
@@ -84,24 +89,26 @@ function New-TestRecord {
 }
 
 Describe 'Start-SiftrFullLoop heuristic classifier' {
-    $user = [pscustomobject]@{
-        Smtp = 'user.person@example.test'
-        Alias = 'user.person'
-        DisplayName = 'User Person'
-        Tokens = @('@user.person', '@user')
-    }
+    BeforeAll {
+        $script:user = [pscustomobject]@{
+            Smtp = 'user.person@example.test'
+            Alias = 'user.person'
+            DisplayName = 'User Person'
+            Tokens = @('@user.person', '@user')
+        }
 
-    $config = [pscustomobject]@{
-        orgDomain = 'example.test'
-    }
+        $script:config = [pscustomobject]@{
+            orgDomain = 'example.test'
+        }
 
-    $org = [pscustomobject]@{
-        manager = [pscustomobject]@{ name = 'Manager Person'; email = 'manager.person@example.test' }
-        directs = @()
-        peers = @(
-            [pscustomobject]@{ name = 'Peer Person'; email = 'peer.person@example.test' }
-        )
-        slt = $null
+        $script:org = [pscustomobject]@{
+            manager = [pscustomobject]@{ name = 'Manager Person'; email = 'manager.person@example.test' }
+            directs = @()
+            peers = @(
+                [pscustomobject]@{ name = 'Peer Person'; email = 'peer.person@example.test' }
+            )
+            slt = $null
+        }
     }
 
     It 'keeps user-authored mail out of Low Priority' {
@@ -117,8 +124,8 @@ Describe 'Start-SiftrFullLoop heuristic classifier' {
 
         $decision = Get-HeuristicDecision -Latest $latest -ThreadRecords @($latest) -User $user -Config $config -Org $org
 
-        $decision.tier | Should Be 'INFORMED'
-        $decision.reason | Should Be 'Fallback Phase 2: user-authored message'
+        $decision.tier | Should -Be 'INFORMED'
+        $decision.reason | Should -Be 'Fallback Phase 2: user-authored message'
     }
 
     It 'treats peer status updates as informed even when only the display name matches org context' {
@@ -134,8 +141,8 @@ Describe 'Start-SiftrFullLoop heuristic classifier' {
 
         $decision = Get-HeuristicDecision -Latest $latest -ThreadRecords @($latest) -User $user -Config $config -Org $org
 
-        $decision.tier | Should Be 'INFORMED'
-        $decision.reason | Should Be 'Fallback Phase 2: org sender FYI'
+        $decision.tier | Should -Be 'INFORMED'
+        $decision.reason | Should -Be 'Fallback Phase 2: org sender FYI'
     }
 
     It 'round-trips stored UTC bookmarks through the current local timezone' {
@@ -144,7 +151,67 @@ Describe 'Start-SiftrFullLoop heuristic classifier' {
         $local = Convert-UtcToCurrentLocalDateTime -Timestamp $utc
         $roundTrip = Convert-CurrentLocalToUtc -Timestamp $local
 
-        $local.Kind | Should Be 'Local'
-        $roundTrip.ToString('o') | Should Be $utc.ToString('o')
+        $local.Kind | Should -Be 'Local'
+        $roundTrip.ToString('o') | Should -Be $utc.ToString('o')
+    }
+}
+
+Describe 'Start-SiftrFullLoop backlog and action reliability' {
+    BeforeAll {
+        $global:LoopRecentWindowHours = 72
+    }
+
+    It 'keeps recent uncategorized backlog eligible across bookmark advances' {
+        $bookmark = (Get-CurrentLocalDateTime).AddHours(-1)
+        $backlogSince = Get-LoopBacklogSince -Since $bookmark -State ([pscustomobject]@{ mode = 'continuous' })
+        $messages = @(
+            [pscustomobject]@{ ReceivedTime = (Get-CurrentLocalDateTime).AddHours(-2); Subject = 'missed earlier cycle' }
+            [pscustomobject]@{ ReceivedTime = (Get-CurrentLocalDateTime).AddHours(-80); Subject = 'historical backlog' }
+        )
+
+        $filtered = @(Filter-LoopMessagesBySince -Messages $messages -Since $backlogSince)
+
+        $filtered.Count | Should -Be 1
+        $filtered[0].Subject | Should -Be 'missed earlier cycle'
+    }
+
+    It 'honors an older continuous-mode recovery bookmark' {
+        $bookmark = (Get-CurrentLocalDateTime).AddHours(-100)
+
+        $backlogSince = Get-LoopBacklogSince -Since $bookmark -State ([pscustomobject]@{ mode = 'continuous' })
+
+        $backlogSince.ToString('o') | Should -Be $bookmark.ToString('o')
+    }
+
+    It 'fails the cycle when Outlook actions report errors' {
+        $summary = [pscustomobject]@{
+            Errors = 1
+            Details = @(
+                [pscustomobject]@{
+                    Action = 'Failed'
+                    Subject = 'Newsletter'
+                    Error = 'Move failed'
+                }
+            )
+        }
+
+        { Assert-SiftrInboxActionSummary -Summary $summary } |
+            Should -Throw 'Outlook actions reported 1 error(s): Newsletter: Move failed'
+    }
+
+    It 'allows nonfatal Outlook skips' {
+        $summary = [pscustomobject]@{
+            Errors = 0
+            Skipped = 1
+            Details = @(
+                [pscustomobject]@{
+                    Action = 'Skipped'
+                    Subject = 'Moved elsewhere'
+                    Error = 'Message not found in Inbox root'
+                }
+            )
+        }
+
+        { Assert-SiftrInboxActionSummary -Summary $summary } | Should -Not -Throw
     }
 }
