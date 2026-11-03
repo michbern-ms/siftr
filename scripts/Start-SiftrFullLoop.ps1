@@ -94,13 +94,33 @@ function Write-Utf8Json {
 
     $tempPath = "$resolvedPath.$PID.$([guid]::NewGuid().ToString('N')).tmp"
     $backupPath = "$resolvedPath.$PID.$([guid]::NewGuid().ToString('N')).bak"
+    $maxWriteAttempts = 5
     try {
-        [System.IO.File]::WriteAllText($tempPath, $json, $Utf8NoBom)
-        if ([System.IO.File]::Exists($resolvedPath)) {
-            [System.IO.File]::Replace($tempPath, $resolvedPath, $backupPath, $true)
-        }
-        else {
-            [System.IO.File]::Move($tempPath, $resolvedPath)
+        for ($attempt = 1; ; $attempt++) {
+            try {
+                if (-not [System.IO.File]::Exists($tempPath)) {
+                    [System.IO.File]::WriteAllText($tempPath, $json, $Utf8NoBom)
+                }
+                if ([System.IO.File]::Exists($resolvedPath)) {
+                    [System.IO.File]::Replace($tempPath, $resolvedPath, $backupPath, $true)
+                }
+                else {
+                    [System.IO.File]::Move($tempPath, $resolvedPath)
+                }
+                break
+            }
+            catch {
+                # OneDrive sync can transiently lock the destination; retry before failing the caller.
+                $retryable = ($_.Exception -is [System.IO.IOException]) -or
+                    ($_.Exception -is [System.UnauthorizedAccessException]) -or
+                    ($_.Exception.InnerException -is [System.IO.IOException]) -or
+                    ($_.Exception.InnerException -is [System.UnauthorizedAccessException])
+                if (-not $retryable -or $attempt -ge $maxWriteAttempts) { throw }
+                Start-Sleep -Milliseconds (150 * $attempt)
+                if ([System.IO.File]::Exists($backupPath)) {
+                    Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+                }
+            }
         }
     }
     finally {
